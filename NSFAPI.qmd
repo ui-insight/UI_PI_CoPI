@@ -1,0 +1,195 @@
+---
+title: "NSF API"
+author: "Barrie Robison"
+date: "2023-12-12"
+categories: [NSF, API, Grants, Timeline]
+draft: true
+---
+
+## What is in the NSF API?
+
+
+
+```{r}
+# Load necessary libraries
+library(httr)
+library(jsonlite)
+library(tidyverse)
+library(readxl)
+library(ggalt)
+library(plotly)
+library(lubridate)
+library(scales)
+
+
+```
+
+
+```{r}
+
+
+# Base URL for the API
+base_url <- "https://www.research.gov/awardapi-service/v1/awards.json?awardeeName=%22regents+of+the+university+of+idaho%22"
+
+printFields <- "rpp,offset,id,agency,awardeeCity,awardeeCountryCode,awardeeDistrictCode,awardeeName,awardeeStateCode,awardeeZipCode,cfdaNumber,coPDPI,date,startDate,expDate,estimatedTotalAmt,fundsObligatedAmt,ueiNumber,fundProgramName,parentUeiNumber,pdPIName,perfCity,perfCountryCode,perfDistrictCode,perfLocation,perfStateCode,perfZipCode,poName,primaryProgram,transType,title,awardee,poPhone,poEmail,awardeeAddress,perfAddress,publicationResearch,publicationConference,fundAgencyCode,awardAgencyCode,projectOutComesReport,abstractText,piFirstName,piMiddeInitial,piLastName,piEmail"
+
+# Initialize an empty data frame to store results
+all_awards <- tibble()
+
+# Number of results per page (as per API settings)
+results_per_page <- 25
+
+# Variable to keep track of the current page number
+current_page <- 1
+
+# Variable to control the loop
+keep_going <- TRUE
+
+while(keep_going) {
+    # Calculate the offset for the current page
+    offset <- (current_page - 1) * results_per_page + 1
+
+    # Construct the full URL with offset
+    url <- paste0(base_url, "&offset=", offset, "&printFields=", printFields)
+
+    # Make the API call
+    response <- GET(url)
+
+    # Check if the call was successful
+    if (status_code(response) == 200) {
+        # Extract and parse the JSON data
+        json_data <- content(response, type = "text", encoding = "UTF-8")
+        parsed_data <- fromJSON(json_data, flatten = TRUE)
+
+        # Extract the 'award' data and add to the all_awards data frame
+        awards_data <- parsed_data$response$award
+        all_awards <- bind_rows(all_awards, as_tibble(awards_data))
+
+        # Debug: Print the current page number and number of awards fetched
+        print(paste("Page:", current_page, "- Awards fetched:", length(awards_data$id)))
+
+        # Check if the current page has less than results_per_page awards, then it's the last page
+        if (length(awards_data$id) < results_per_page) {
+            keep_going <- FALSE
+        } else {
+            current_page <- current_page + 1
+        }
+    } else {
+        print(paste("Failed to fetch data: Status code", status_code(response)))
+        keep_going <- FALSE
+    }
+}
+
+#write.csv(all_awards, "UINSF.csv")
+
+
+
+```
+
+## Summarize awards by year
+
+```{r}
+
+NSFYear <- all_awards %>%
+  select(estimatedTotalAmt, fundsObligatedAmt, fundProgramName,
+         id, pdPIName, startDate, expDate, title, transType, coPDPI)%>%
+  mutate(startDate = as.Date(startDate, format = "%m/%d/%Y"))%>%
+  mutate(expDate = as.Date(expDate, format = "%m/%d/%Y"))%>%
+  filter(expDate > as.Date("2019-01-01") )%>%
+  mutate(periods = ceiling(as.numeric(difftime(expDate, startDate, units = "days")) / 365.25))%>%
+  mutate(estimatedTotalAmt = as.numeric(estimatedTotalAmt))
+
+
+NSFYear <- NSFYear %>%
+  mutate(estimatedTotalAmtMillions = estimatedTotalAmt / 1e6)  # Convert to millions
+
+ggplot(NSFYear, aes(x = startDate, y = estimatedTotalAmt, fill = transType)) +
+  geom_col() +
+  scale_x_date(date_breaks = "5 year", date_labels = "%Y") +  # Display only the year part
+  scale_y_continuous(labels = scales::label_number(scale = 1e-6, suffix = "M")) +  # Format y-axis
+  labs(
+    x = "Start Date",
+    y = "(Estimated) Total Award Amount (Millions)",
+    fill = "Transaction Type"  # Change legend title
+  )
+
+
+```
+
+
+```{r}
+library(lubridate)
+
+TotalAwardValue <- NSFYear %>%
+  group_by(pdPIName)%>%
+  summarise(Total = sum(as.numeric(estimatedTotalAmt)))
+
+NSFYear <- NSFYear %>%
+  group_by(pdPIName) %>%
+  mutate(totalAmt = sum(as.numeric(estimatedTotalAmt))) %>%
+  ungroup()%>%
+  mutate(startyear = year(ymd(startDate)))%>%
+  mutate(year = as.numeric(startyear))
+
+
+Tval <- ggplot(TotalAwardValue, aes(x=reorder(pdPIName, -Total), y=Total)) +
+  geom_col()
+
+ggplotly(Tval)
+
+stack_Tval <- ggplot(NSFYear, aes(x=reorder(pdPIName, -totalAmt), y = estimatedTotalAmt))+
+  geom_col( aes(fill = startyear),position = "stack")+
+  theme(legend.position = "none")+
+  scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+ggplotly(stack_Tval, tooltip = c("x", "y"))
+
+
+# plot_ly(NSFYear, x = ~reorder(pdPIName, -totalAmt), y = ~estimatedTotalAmt, 
+#         type = 'bar', 
+#         color = ~factor(startyear),
+#         text = ~paste("Additional Info: ", title))  %>% 
+#   layout(yaxis = list(title = 'Total Amount', tickformat = "$,.2f"),
+#          xaxis = list(title = '', showticklabels = FALSE),
+#          showlegend = FALSE)
+
+
+```
+
+
+```{r}
+NSFtimeline <- NSFYear %>%
+  filter(expDate>=as.Date("2024-01-01"))%>%
+  mutate(name= paste(pdPIName, " ", id, estimatedTotalAmt)) %>%
+  mutate(start = as.Date(startDate, "%m/%d/%Y")) %>%  # Ensure this matches your date format
+  mutate(end = as.Date(expDate, "%m/%d/%Y")) %>%      # Ensure this matches your date format
+  select(name, start, end, estimatedTotalAmt)
+
+
+
+
+  
+q<- ggplot(NSFtimeline, aes(x=start, xend=end, y=reorder(name, start), color = log(estimatedTotalAmt)))+
+  geom_dumbbell(
+                colour_xend = "darkblue",
+                size = 1,
+                dot_guide = TRUE,
+                dot_guide_size = 0.15,
+                dot_guide_colour = "lightgrey")+
+  scale_x_date(
+    date_breaks = "1 year",          # Set breaks to occur every year
+    date_labels = "%Y"               # Set labels to display only the year
+  ) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  theme(axis.text.y = element_text(size = 4, vjust = 0.5, hjust=1))+
+  labs(y = "PI and Award ID") 
+
+q
+  
+
+
+
+```
+[]
